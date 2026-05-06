@@ -10,7 +10,7 @@ pipeline {
         string(name: 'APP_EC2_HOST', defaultValue: 'your-app-ec2-public-ip', description: 'Public IP or DNS of the application EC2 instance')
         string(name: 'APP_EC2_USER', defaultValue: 'ubuntu', description: 'SSH user for the application EC2 instance')
         string(name: 'DEPLOY_PATH', defaultValue: '/home/ubuntu/recruitment-system', description: 'Deployment directory on the application EC2 instance')
-        string(name: 'REMOTE_ENV_FILE', defaultValue: '/home/ubuntu/.env.recruitment', description: 'Production env file already present on the application EC2 instance')
+        string(name: 'REMOTE_ENV_FILE', defaultValue: '/home/ubuntu/.env', description: 'Production env file already present on the application EC2 instance')
     }
 
     environment {
