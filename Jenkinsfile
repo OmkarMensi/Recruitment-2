@@ -16,28 +16,15 @@ pipeline {
     environment {
         APP_NAME = 'recruitment-system'
         SSH_CREDENTIALS_ID = 'app-ec2-ssh-key'
-        RELEASE_ARCHIVE = 'recruitment-system.tar.gz'
+        GIT_REPOSITORY = 'https://github.com/ChaitraBiradar10/Recruitment-system.git'
+        GIT_BRANCH = 'main'
     }
 
     stages {
         stage('Checkout') {
             steps {
-                checkout scm
-            }
-        }
-
-        stage('Package Deployment Files') {
-            steps {
-                sh '''
-                    rm -f "${RELEASE_ARCHIVE}"
-                    tar \
-                      --exclude='.git' \
-                      --exclude='backend/target' \
-                      --exclude='frontend/node_modules' \
-                      --exclude='.env' \
-                      --exclude='.env.production' \
-                      -czf "${RELEASE_ARCHIVE}" .
-                '''
+                deleteDir()
+                git branch: env.GIT_BRANCH, url: env.GIT_REPOSITORY
             }
         }
 
@@ -60,6 +47,11 @@ pipeline {
                                 sudo apt-get install -y docker-compose-v2
                             fi
 
+                            if ! command -v git >/dev/null 2>&1; then
+                                sudo apt-get update -y
+                                sudo apt-get install -y git
+                            fi
+
                             if [ ! -f '"${REMOTE_ENV_FILE}"' ]; then
                                 echo "Missing production env file: '"${REMOTE_ENV_FILE}"'"
                                 echo "Create it from .env.production.example before running deployment."
@@ -73,16 +65,26 @@ pipeline {
             }
         }
 
-        stage('Upload Release') {
+        stage('Sync Repository') {
             steps {
                 sshagent([env.SSH_CREDENTIALS_ID]) {
                     sh '''
-                        scp -o StrictHostKeyChecking=no "${RELEASE_ARCHIVE}" "${APP_EC2_USER}@${APP_EC2_HOST}:/tmp/${RELEASE_ARCHIVE}"
-
                         ssh -o StrictHostKeyChecking=no "${APP_EC2_USER}@${APP_EC2_HOST}" '
                             set -eu
-                            mkdir -p '"${DEPLOY_PATH}"'
-                            tar -xzf /tmp/'"${RELEASE_ARCHIVE}"' -C '"${DEPLOY_PATH}"'
+
+                            if [ -d '"${DEPLOY_PATH}"'/.git ]; then
+                                cd '"${DEPLOY_PATH}"'
+                                git fetch origin '"${GIT_BRANCH}"'
+                                git reset --hard origin/'"${GIT_BRANCH}"'
+                                git clean -fdx -e .env.production -e backend/uploads/
+                            elif [ -d '"${DEPLOY_PATH}"' ] && [ "$(ls -A '"${DEPLOY_PATH}"')" ]; then
+                                echo "Deployment path exists but is not a Git checkout: '"${DEPLOY_PATH}"'"
+                                echo "Move or empty this directory once, then rerun the pipeline."
+                                exit 1
+                            else
+                                git clone --branch '"${GIT_BRANCH}"' '"${GIT_REPOSITORY}"' '"${DEPLOY_PATH}"'
+                            fi
+
                             cp '"${REMOTE_ENV_FILE}"' '"${DEPLOY_PATH}"'/.env.production
                         '
                     '''
@@ -163,9 +165,6 @@ pipeline {
         }
         failure {
             echo "Deployment failed. Check the failed stage logs above."
-        }
-        cleanup {
-            sh 'rm -f "${RELEASE_ARCHIVE}"'
         }
     }
 }
