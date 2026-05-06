@@ -1,0 +1,6 @@
+.env
+.env.*
+!.env.production.example
+
+backend/target/
+frontend/node_modules/
