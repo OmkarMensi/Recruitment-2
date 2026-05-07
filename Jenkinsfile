@@ -1,170 +1,154 @@
 pipeline {
-    agent any
-
-    options {
-        timestamps()
-        disableConcurrentBuilds()
-    }
-
-    parameters {
-        string(name: 'APP_EC2_HOST', defaultValue: 'your-app-ec2-public-ip', description: 'Public IP or DNS of the application EC2 instance')
-        string(name: 'APP_EC2_USER', defaultValue: 'ubuntu', description: 'SSH user for the application EC2 instance')
-        string(name: 'DEPLOY_PATH', defaultValue: '/home/ubuntu/recruitment-system', description: 'Deployment directory on the application EC2 instance')
-        string(name: 'REMOTE_ENV_FILE', defaultValue: '/home/ubuntu/.env', description: 'Production env file already present on the application EC2 instance')
-    }
-
+    agent { label 'Recruitment-Server' }
     environment {
-        APP_NAME = 'recruitment-system'
-        SSH_CREDENTIALS_ID = 'app-ec2-ssh-key'
-        GIT_REPOSITORY = 'https://github.com/ChaitraBiradar10/Recruitment-system.git'
-        GIT_BRANCH = 'main'
+        APP_NAME    = "recruitmentsystem"
+        DEPLOY_PATH = "/home/ubuntu/workspace/recruitmentsystem"
+        ENV_FILE    = "/home/ubuntu/.env.recruitmentsystem"
     }
-
     stages {
-        stage('Checkout') {
+        stage('Git Cloning') {
             steps {
-                deleteDir()
-                git branch: env.GIT_BRANCH, url: env.GIT_REPOSITORY
-            }
-        }
-
-        stage('Prepare Application EC2') {
-            steps {
-                sshagent([env.SSH_CREDENTIALS_ID]) {
-                    sh '''
-                        ssh -o StrictHostKeyChecking=no "${APP_EC2_USER}@${APP_EC2_HOST}" '
-                            set -eu
-
-                            if ! command -v docker >/dev/null 2>&1; then
-                                sudo apt-get update -y
-                                sudo apt-get install -y docker.io
-                                sudo systemctl enable --now docker
-                                sudo usermod -aG docker '"${APP_EC2_USER}"'
-                            fi
-
-                            if ! docker compose version >/dev/null 2>&1; then
-                                sudo apt-get update -y
-                                sudo apt-get install -y docker-compose-v2
-                            fi
-
-                            if ! command -v git >/dev/null 2>&1; then
-                                sudo apt-get update -y
-                                sudo apt-get install -y git
-                            fi
-
-                            if [ ! -f '"${REMOTE_ENV_FILE}"' ]; then
-                                echo "Missing production env file: '"${REMOTE_ENV_FILE}"'"
-                                echo "Create it from .env.production.example before running deployment."
-                                exit 1
-                            fi
-
-                            mkdir -p '"${DEPLOY_PATH}"'
-                        '
-                    '''
+                echo "Cloning repository from GitHub..."
+                sh "mkdir -p ${DEPLOY_PATH}"
+                dir("${DEPLOY_PATH}") {
+                    git branch: 'main',
+                        url: 'https://github.com/ChaitraBiradar10/Recruitment-system.git'
                 }
+                sh "cp ${ENV_FILE} ${DEPLOY_PATH}/.env.recruitmentsystem"
+                echo ".env.recruitmentsystem copied successfully"
             }
         }
-
-        stage('Sync Repository') {
+        stage('Verify ENV File') {
             steps {
-                sshagent([env.SSH_CREDENTIALS_ID]) {
-                    sh '''
-                        ssh -o StrictHostKeyChecking=no "${APP_EC2_USER}@${APP_EC2_HOST}" '
-                            set -eu
+                sh """
+                    if [ ! -f ${DEPLOY_PATH}/.env.recruitmentsystem ]; then
+                        echo "ERROR: .env.recruitmentsystem file missing at ${DEPLOY_PATH}/.env.recruitmentsystem"
+                        echo "Please create it at /home/ubuntu/.env.recruitmentsystem on the server"
+                        exit 1
+                    else
+                        echo ".env.recruitmentsystem file found"
+                    fi
 
-                            if [ -d '"${DEPLOY_PATH}"'/.git ]; then
-                                cd '"${DEPLOY_PATH}"'
-                                git fetch origin '"${GIT_BRANCH}"'
-                                git reset --hard origin/'"${GIT_BRANCH}"'
-                                git clean -fdx -e .env.production -e backend/uploads/
-                            elif [ -d '"${DEPLOY_PATH}"' ] && [ "$(ls -A '"${DEPLOY_PATH}"')" ]; then
-                                echo "Deployment path exists but is not a Git checkout: '"${DEPLOY_PATH}"'"
-                                echo "Move or empty this directory once, then rerun the pipeline."
-                                exit 1
-                            else
-                                git clone --branch '"${GIT_BRANCH}"' '"${GIT_REPOSITORY}"' '"${DEPLOY_PATH}"'
-                            fi
+                    # Validate all required backend variables are present and non-empty
+                    for VAR in APP_FRONTEND_URL APP_CORS_ALLOWED_ORIGINS APP_JWT_SECRET \\
+                               SPRING_MAIL_USERNAME SPRING_MAIL_PASSWORD APP_MAIL_FROM \\
+                               MYSQL_ROOT_PASSWORD MYSQL_DATABASE MYSQL_USER MYSQL_PASSWORD; do
+                        VALUE=\$(grep "^\${VAR}=" ${DEPLOY_PATH}/.env.recruitmentsystem | cut -d '=' -f2 | tr -d '[:space:]')
+                        if [ -z "\$VALUE" ]; then
+                            echo "ERROR: \$VAR is missing or empty in .env.recruitmentsystem"
+                            exit 1
+                        fi
+                        echo "\$VAR is set"
+                    done
 
-                            cp '"${REMOTE_ENV_FILE}"' '"${DEPLOY_PATH}"'/.env.production
-                        '
-                    '''
-                }
+                    # Extract and display HOST_IP for confirmation
+                    HOST_IP=\$(grep '^HOST_IP=' ${DEPLOY_PATH}/.env.recruitmentsystem | cut -d '=' -f2 | tr -d '[:space:]')
+                    if [ -z "\$HOST_IP" ]; then
+                        echo "WARNING: HOST_IP not set in .env.recruitmentsystem"
+                        echo "Add:  HOST_IP=98.87.163.146"
+                    else
+                        echo "HOST_IP=\$HOST_IP"
+                    fi
+
+                    echo "All required ENV variables verified."
+                """
             }
         }
-
+        stage('Setup EC2') {
+            steps {
+                sh """
+                    echo "Checking Docker..."
+                    if ! command -v docker &> /dev/null; then
+                        echo "Installing Docker..."
+                        sudo apt-get update -y
+                        sudo apt-get install -y docker.io
+                        sudo systemctl start docker
+                        sudo systemctl enable docker
+                        sudo usermod -aG docker ubuntu
+                        echo "Docker installed"
+                    else
+                        echo "Docker already present"
+                    fi
+                    if ! docker compose version &> /dev/null; then
+                        echo "Installing Docker Compose..."
+                        sudo apt-get install -y docker-compose-v2
+                        echo "Docker Compose installed"
+                    else
+                        echo "Docker Compose already present"
+                    fi
+                """
+            }
+        }
         stage('Build and Deploy') {
             steps {
-                sshagent([env.SSH_CREDENTIALS_ID]) {
-                    sh '''
-                        ssh -o StrictHostKeyChecking=no "${APP_EC2_USER}@${APP_EC2_HOST}" '
-                            set -eu
-                            cd '"${DEPLOY_PATH}"'
-
-                            sudo docker compose --env-file .env.production down --remove-orphans
-                            sudo docker compose --env-file .env.production build --pull
-                            sudo docker compose --env-file .env.production up -d
-                            sudo docker image prune -f
-                            sudo docker compose --env-file .env.production ps
-                        '
-                    '''
+                dir("${DEPLOY_PATH}") {
+                    sh """
+                        echo "Stopping old containers (keeping volumes to preserve DB data)..."
+                        sudo docker compose --env-file .env.recruitmentsystem down --remove-orphans || true
+                        echo "Building Docker images..."
+                        sudo docker compose --env-file .env.recruitmentsystem build --no-cache
+                        echo "Starting containers..."
+                        sudo docker compose --env-file .env.recruitmentsystem up -d
+                        echo "Pruning dangling images..."
+                        sudo docker image prune -f
+                        echo "Running containers:"
+                        sudo docker compose --env-file .env.recruitmentsystem ps
+                    """
                 }
             }
         }
-
         stage('Health Check') {
             steps {
-                sshagent([env.SSH_CREDENTIALS_ID]) {
-                    sh '''
-                        ssh -o StrictHostKeyChecking=no "${APP_EC2_USER}@${APP_EC2_HOST}" '
-                            set -eu
-                            cd '"${DEPLOY_PATH}"'
-
-                            echo "Waiting for backend health endpoint..."
-                            for attempt in $(seq 1 30); do
-                                status=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/actuator/health || true)
-                                if [ "$status" = "200" ]; then
-                                    echo "Backend is healthy."
-                                    exit 0
-                                fi
-                                echo "Attempt ${attempt}/30 returned HTTP ${status}; retrying..."
-                                sleep 5
-                            done
-
-                            sudo docker compose --env-file .env.production logs backend --tail=80
-                            exit 1
-                        '
-                    '''
-                }
+                sh """
+                    echo "Waiting for backend to be ready..."
+                    max_attempts=30
+                    attempt=0
+                    while [ \$attempt -lt \$max_attempts ]; do
+                        STATUS=\$(curl -s -o /dev/null -w "%{http_code}" \\
+                            http://localhost:8080/actuator/health 2>/dev/null || echo "000")
+                        if [ "\$STATUS" = "200" ]; then
+                            echo "Backend is healthy - HTTP status: \$STATUS"
+                            break
+                        fi
+                        attempt=\$((attempt+1))
+                        echo "Attempt \$attempt/\$max_attempts - HTTP \$STATUS, retrying in 5s..."
+                        sleep 5
+                    done
+                    if [ \$attempt -eq \$max_attempts ]; then
+                        echo "ERROR: Backend health check failed after \$max_attempts attempts"
+                        sudo docker compose --env-file ${DEPLOY_PATH}/.env.recruitmentsystem -f ${DEPLOY_PATH}/docker-compose.yml logs backend --tail=50
+                        exit 1
+                    fi
+                    echo "Final container status:"
+                    sudo docker compose --env-file ${DEPLOY_PATH}/.env.recruitmentsystem -f ${DEPLOY_PATH}/docker-compose.yml ps
+                """
             }
         }
-
         stage('Monitoring Check') {
             steps {
-                sshagent([env.SSH_CREDENTIALS_ID]) {
-                    sh '''
-                        ssh -o StrictHostKeyChecking=no "${APP_EC2_USER}@${APP_EC2_HOST}" '
-                            set -eu
-                            curl -fsS http://localhost:9090/-/ready >/dev/null
-                            curl -fsS http://localhost:9100/metrics >/dev/null
-                            curl -fsS http://localhost:3001/api/health >/dev/null
-                            echo "Prometheus, Grafana, and node-exporter are reachable locally."
-                        '
-                    '''
-                }
+                sh """
+                    echo "Checking monitoring stack..."
+                    curl -fsS http://localhost:9090/-/ready  >/dev/null && echo "Prometheus: OK"
+                    curl -fsS http://localhost:9100/metrics  >/dev/null && echo "Node Exporter: OK"
+                    curl -fsS http://localhost:3001/api/health >/dev/null && echo "Grafana: OK"
+                    echo "All monitoring services are reachable."
+                """
             }
         }
     }
-
     post {
         success {
-            echo "Deployment successful."
-            echo "Frontend  : http://${params.APP_EC2_HOST}"
-            echo "Backend   : http://${params.APP_EC2_HOST}:8080"
-            echo "Prometheus: http://${params.APP_EC2_HOST}:9090"
-            echo "Grafana   : http://${params.APP_EC2_HOST}:3001"
+            echo "Deployment successful - Build #${BUILD_NUMBER}"
+            echo "Frontend  : http://98.87.163.146"
+            echo "Backend   : http://98.87.163.146:8080"
+            echo "Grafana   : http://98.87.163.146:3001"
+            echo "Prometheus: http://98.87.163.146:9090"
         }
         failure {
-            echo "Deployment failed. Check the failed stage logs above."
+            echo "Deployment failed at build #${BUILD_NUMBER}. Check stage logs above."
+        }
+        always {
+            echo "Pipeline finished."
         }
     }
 }
