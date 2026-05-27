@@ -3,7 +3,6 @@ pipeline {
     environment {
         APP_NAME    = "recruitmentsystem"
         DEPLOY_PATH = "/home/ubuntu/workspace/recruitmentsystem"
-        ENV_FILE    = "/home/ubuntu/.env.recruitmentsystem"
     }
     stages {
         stage('Git Cloning') {
@@ -14,24 +13,55 @@ pipeline {
                     git branch: 'main',
                         url: 'https://github.com/ChaitraBiradar10/Recruitment-system.git'
                 }
-                sh "cp ${ENV_FILE} ${DEPLOY_PATH}/.env.recruitmentsystem"
-                echo ".env.recruitmentsystem copied successfully"
+            }
+        }
+        stage('Prepare ENV File') {
+            steps {
+                withCredentials([file(credentialsId: 'recruitment-env-file', variable: 'ENV_FILE_PATH')]) {
+                    sh """
+                        cp "\$ENV_FILE_PATH" ${DEPLOY_PATH}/.env.recruitmentsystem
+                        chmod 600 ${DEPLOY_PATH}/.env.recruitmentsystem
+
+                        # Auto-detect the current public IP of this EC2 instance
+                        # This handles the case where the instance was restarted and got a new IP
+                        CURRENT_IP=\$(curl -sf --max-time 5 http://169.254.169.254/latest/meta-data/public-ipv4 || \
+                                      curl -sf --max-time 5 https://api.ipify.org || \
+                                      echo "")
+
+                        if [ -z "\$CURRENT_IP" ]; then
+                            echo "WARNING: Could not auto-detect public IP. Using HOST_IP from env file as-is."
+                        else
+                            echo "Detected public IP: \$CURRENT_IP"
+
+                            # Update HOST_IP in the env file
+                            sed -i "s|^HOST_IP=.*|HOST_IP=\$CURRENT_IP|" ${DEPLOY_PATH}/.env.recruitmentsystem
+
+                            # Update the URL fields that depend on the IP
+                            sed -i "s|^APP_FRONTEND_URL=.*|APP_FRONTEND_URL=http://\$CURRENT_IP|" ${DEPLOY_PATH}/.env.recruitmentsystem
+                            sed -i "s|^APP_CORS_ALLOWED_ORIGINS=.*|APP_CORS_ALLOWED_ORIGINS=http://\$CURRENT_IP|" ${DEPLOY_PATH}/.env.recruitmentsystem
+                            sed -i "s|^GRAFANA_ROOT_URL=.*|GRAFANA_ROOT_URL=http://\$CURRENT_IP:3001/|" ${DEPLOY_PATH}/.env.recruitmentsystem
+
+                            echo "ENV file updated with current IP: \$CURRENT_IP"
+                        fi
+
+                        echo ".env.recruitmentsystem ready"
+                    """
+                }
             }
         }
         stage('Verify ENV File') {
             steps {
                 sh """
                     if [ ! -f ${DEPLOY_PATH}/.env.recruitmentsystem ]; then
-                        echo "ERROR: .env.recruitmentsystem file missing at ${DEPLOY_PATH}/.env.recruitmentsystem"
-                        echo "Please create it at /home/ubuntu/.env.recruitmentsystem on the server"
+                        echo "ERROR: .env.recruitmentsystem file missing"
                         exit 1
                     else
                         echo ".env.recruitmentsystem file found"
                     fi
 
-                    # Validate all required backend variables are present and non-empty
-                    for VAR in APP_FRONTEND_URL APP_CORS_ALLOWED_ORIGINS APP_JWT_SECRET \\
-                               SPRING_MAIL_USERNAME SPRING_MAIL_PASSWORD APP_MAIL_FROM \\
+                    # Validate all required variables are present and non-empty
+                    for VAR in APP_FRONTEND_URL APP_CORS_ALLOWED_ORIGINS APP_JWT_SECRET \
+                               SPRING_MAIL_USERNAME SPRING_MAIL_PASSWORD APP_MAIL_FROM \
                                MYSQL_ROOT_PASSWORD MYSQL_DATABASE MYSQL_USER MYSQL_PASSWORD; do
                         VALUE=\$(grep "^\${VAR}=" ${DEPLOY_PATH}/.env.recruitmentsystem | cut -d '=' -f2 | tr -d '[:space:]')
                         if [ -z "\$VALUE" ]; then
@@ -41,15 +71,8 @@ pipeline {
                         echo "\$VAR is set"
                     done
 
-                    # Extract and display HOST_IP for confirmation
                     HOST_IP=\$(grep '^HOST_IP=' ${DEPLOY_PATH}/.env.recruitmentsystem | cut -d '=' -f2 | tr -d '[:space:]')
-                    if [ -z "\$HOST_IP" ]; then
-                        echo "WARNING: HOST_IP not set in .env.recruitmentsystem"
-                        echo "Add:  HOST_IP=98.87.163.146"
-                    else
-                        echo "HOST_IP=\$HOST_IP"
-                    fi
-
+                    echo "HOST_IP=\$HOST_IP"
                     echo "All required ENV variables verified."
                 """
             }
@@ -104,7 +127,7 @@ pipeline {
                     max_attempts=30
                     attempt=0
                     while [ \$attempt -lt \$max_attempts ]; do
-                        STATUS=\$(curl -s -o /dev/null -w "%{http_code}" \\
+                        STATUS=\$(curl -s -o /dev/null -w "%{http_code}" \
                             http://localhost:8080/actuator/health 2>/dev/null || echo "000")
                         if [ "\$STATUS" = "200" ]; then
                             echo "Backend is healthy - HTTP status: \$STATUS"
@@ -138,11 +161,14 @@ pipeline {
     }
     post {
         success {
-            echo "Deployment successful - Build #${BUILD_NUMBER}"
-            echo "Frontend  : http://98.87.163.146"
-            echo "Backend   : http://98.87.163.146:8080"
-            echo "Grafana   : http://98.87.163.146:3001"
-            echo "Prometheus: http://98.87.163.146:9090"
+            script {
+                def ip = sh(script: "grep '^HOST_IP=' ${DEPLOY_PATH}/.env.recruitmentsystem | cut -d '=' -f2 | tr -d '[:space:]'", returnStdout: true).trim()
+                echo "Deployment successful - Build #${BUILD_NUMBER}"
+                echo "Frontend  : http://${ip}"
+                echo "Backend   : http://${ip}:8080"
+                echo "Grafana   : http://${ip}:3001"
+                echo "Prometheus: http://${ip}:9090"
+            }
         }
         failure {
             echo "Deployment failed at build #${BUILD_NUMBER}. Check stage logs above."

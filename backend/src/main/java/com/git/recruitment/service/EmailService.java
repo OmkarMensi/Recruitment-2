@@ -2,7 +2,6 @@ package com.git.recruitment.service;
 
 import com.git.recruitment.event.UserActionEvent;
 import com.git.recruitment.event.UserActionType;
-import com.git.recruitment.exception.EmailSendingException;
 import com.git.recruitment.model.*;
 import jakarta.mail.internet.MimeMessage;
 import lombok.RequiredArgsConstructor;
@@ -140,8 +139,10 @@ public class EmailService {
             mailSender.send(msg);
             log.info("Email sent to {}", to);
         } catch (Exception e) {
+            // Log and swallow: email failures must never roll back a business transaction.
+            // All callers are either @Async or fire-and-forget; propagating here would
+            // silently undo status changes (e.g. candidate SELECTED rolling back).
             log.error("Email failed to {}: {}", to, e.getMessage(), e);
-            throw new EmailSendingException("Unable to send email to " + to, e);
         }
     }
 

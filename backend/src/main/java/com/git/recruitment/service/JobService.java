@@ -205,13 +205,17 @@ public class JobService {
         app.setFinalSelected(req.getFinalSelected());
         if (Boolean.TRUE.equals(req.getFinalSelected())) {
             app.setStatus(JobApplication.AppStatus.SELECTED);
-            emailService.sendFinalSelection(app.getUser(), app.getJob());
         } else {
             app.setStatus(JobApplication.AppStatus.REJECTED);
             publishApplicationAction(app, UserActionType.FINAL_DECISION_RECORDED,
                     "The final decision for your application to " + jobLabel(app.getJob()) + " has been recorded as not selected.");
         }
-        return toAppResponse(appRepository.save(app));
+        JobApplication saved = appRepository.save(app);
+        // Send email AFTER save so a mail failure can never roll back the status change
+        if (Boolean.TRUE.equals(req.getFinalSelected())) {
+            emailService.sendFinalSelection(saved.getUser(), saved.getJob());
+        }
+        return toAppResponse(saved);
     }
 
     // ── Helpers ───────────────────────────────────────────────
@@ -219,9 +223,15 @@ public class JobService {
     public ApplicationResponse rejectApplication(Long appId) {
         JobApplication app = getApp(appId);
         app.setFinalSelected(false);
-        app.setInterviewResult("Rejected");
+        // Only set interview-level fields if the application was actually in the interview process
+        boolean wasInInterview = app.getStatus() == JobApplication.AppStatus.INTERVIEW_SCHEDULED
+                || app.getStatus() == JobApplication.AppStatus.APTITUDE_CLEARED
+                || app.getStatus() == JobApplication.AppStatus.APTITUDE_FAILED;
+        if (wasInInterview || app.getInterviewResult() == null) {
+            app.setInterviewResult("Rejected");
+        }
         if (app.getInterviewNotes() == null || app.getInterviewNotes().isBlank()) {
-            app.setInterviewNotes("Rejected by admin before proceeding in the selection process.");
+            app.setInterviewNotes("Rejected by admin before completing the selection process.");
         }
         app.setStatus(JobApplication.AppStatus.REJECTED);
         JobApplication saved = appRepository.save(app);
@@ -482,6 +492,7 @@ public class JobService {
             app.setInterviewResult("Rejected");
             app.setStatus(JobApplication.AppStatus.REJECTED);
         } else {
+            // PASS: update status to reflect the round was cleared
             app.setStatus(getCompletedPassStatusForRoundType(round.getRoundType()));
         }
         appRepository.save(app);
@@ -525,15 +536,21 @@ public class JobService {
         if (Boolean.TRUE.equals(req.getFinalSelected())) {
             app.setInterviewResult("Selected");
             app.setStatus(JobApplication.AppStatus.SELECTED);
-            emailService.sendFinalSelection(app.getUser(), app.getJob());
         } else {
             app.setInterviewResult("Rejected");
             app.setStatus(JobApplication.AppStatus.REJECTED);
-            publishApplicationAction(app, UserActionType.FINAL_DECISION_RECORDED,
-                    "The final decision for your application to " + jobLabel(app.getJob()) + " has been recorded as not selected.");
         }
 
-        return toAppResponse(appRepository.save(app));
+        JobApplication saved = appRepository.save(app);
+        // Send email AFTER save so a mail failure can never roll back the status change
+        if (Boolean.TRUE.equals(req.getFinalSelected())) {
+            emailService.sendFinalSelection(saved.getUser(), saved.getJob());
+        } else {
+            publishApplicationAction(saved, UserActionType.FINAL_DECISION_RECORDED,
+                    "The final decision for your application to " + jobLabel(saved.getJob()) + " has been recorded as not selected.");
+        }
+
+        return toAppResponse(saved);
     }
 
     private void publishRoundScheduled(JobApplication app, InterviewRound round, boolean rescheduled) {
@@ -682,6 +699,9 @@ public class JobService {
     }
 
     private JobApplication.AppStatus getCompletedPassStatusForRoundType(String roundType) {
+        // After passing an aptitude round → APTITUDE_CLEARED
+        // After passing any interview/other round → stay at INTERVIEW_SCHEDULED
+        // (signals "in the interview process, a round was cleared, awaiting next step")
         return isAptitudeRound(roundType)
                 ? JobApplication.AppStatus.APTITUDE_CLEARED
                 : JobApplication.AppStatus.INTERVIEW_SCHEDULED;
