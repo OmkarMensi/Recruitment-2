@@ -1,0 +1,50 @@
+services: 
+  mysql:
+    image: mysql:8.3.0
+    container_name: recruitdb-cont
+    restart: unless-stopped
+    environment: 
+     MYSQL_ROOT_PASSWORD: root
+     MYSQL_DATABASE: git_recruitment
+     MYSQL_USER: springuser
+     MYSQL_PASSWORD: spring123
+    networks:
+      - my-network
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p\"$${MYSQL_ROOT_PASSWORD}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: recruitbackend-cont
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    depends_on: 
+      mysql:
+        condition: service_healthy
+    env_file:
+      - ./.env
+    networks: 
+      - my-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    networks:
+       - my-network 
+
+networks:
+ my-network:
+     external: true

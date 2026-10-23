@@ -15,7 +15,7 @@
     "start": "react-scripts start",
     "build": "react-scripts build"
   },
-  "proxy": "http://localhost:8080",
+  "proxy": "http://backend:8080",
   "browserslist": {
     "production": [
       ">0.2%",
